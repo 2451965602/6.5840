@@ -1,15 +1,15 @@
 package mr
 
 import (
+	"github.com/sasha-s/go-deadlock"
 	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
 	"strconv"
-	"sync"
 	"time"
 )
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
 
 type Task struct {
 	TaskSlice     []string
@@ -24,7 +24,7 @@ type Coordinator struct {
 	Status    string
 	AwaitTask []int
 	Donenum   int
-	mu        sync.Mutex
+	mu        deadlock.Mutex
 }
 
 func (c *Coordinator) TaskAssignment(args *TaskArgs, reply *TaskReply) error {
@@ -36,34 +36,28 @@ func (c *Coordinator) TaskAssignment(args *TaskArgs, reply *TaskReply) error {
 
 	reply.NReduce = c.NReduce
 
-	c.mu.Lock()
 	if len(c.AwaitTask) > 0 {
 		reply.TaskSort = c.Status
+
+		c.mu.Lock()
 		index := c.AwaitTask[0]
 		reply.TaskId = index
 		reply.Task = c.Tasks[index].TaskSlice
-		c.AwaitTask = append(c.AwaitTask[:0], c.AwaitTask[1:]...)
+		c.AwaitTask = c.AwaitTask[1:]
 		c.Tasks[index].LastCheckTime = time.Now()
 		c.Tasks[index].Statue = "Running"
-
 		c.mu.Unlock()
-		return nil
-	}
-
-	if c.Status == "Map" && len(c.AwaitTask) == 0 {
-		reply.TaskSort = "Wait"
-		return nil
-	}
-
-	if c.Status == "Reduce" && len(c.AwaitTask) == 0 {
+	} else if c.Status == "Done" {
 		reply.TaskSort = "Done"
-		return nil
+	} else if len(c.AwaitTask) == 0 {
+		reply.TaskSort = "Wait"
 	}
 
 	return nil
 }
 
 func (c *Coordinator) TaskDone() {
+	c.mu.Lock()
 	if c.Status == "Map" {
 
 		Tasks := make([]Task, c.NReduce)
@@ -87,6 +81,7 @@ func (c *Coordinator) TaskDone() {
 		c.Donenum = 0
 
 	}
+	c.mu.Unlock()
 }
 
 func (c *Coordinator) DoneHandle(args *DoneArgs, reply *DoneReply) error {
@@ -103,22 +98,20 @@ func (c *Coordinator) DoneHandle(args *DoneArgs, reply *DoneReply) error {
 
 func (c *Coordinator) HealthUpdata(args *HealthArgs, reply *HealthReply) error {
 
-	c.mu.Lock()
 	c.Tasks[args.TaskId].LastCheckTime = time.Now()
-	c.mu.Unlock()
 	return nil
 }
 
 func (c *Coordinator) HealthCheck() {
 
-	for i, v := range c.Tasks {
+	for {
 
-		if v.Statue == "Running" && time.Now().Sub(v.LastCheckTime) > 1*time.Second {
+		for i := 0; i < c.TotalTask; i++ {
 
-			c.mu.Lock()
-			c.AwaitTask = append(c.AwaitTask, i)
-			c.mu.Unlock()
-
+			if c.Tasks[i].Statue == "Running" && time.Now().Sub(c.Tasks[i].LastCheckTime) > 1*time.Second {
+				c.AwaitTask = append(c.AwaitTask, i)
+				c.Tasks[i].Statue = "Wait"
+			}
 		}
 
 	}
@@ -155,7 +148,7 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{NReduce: nReduce}
-
+	deadlock.Opts.DeadlockTimeout = time.Second
 	c.Status = "Map"
 	sliceCapability := 3
 

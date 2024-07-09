@@ -106,7 +106,10 @@ func ReduceWorker(reducef func(string, []string) string, TaskId int, Task []stri
 	sort.Sort(ByKey(intermediate))
 
 	oname := "mr-out-" + strconv.Itoa(TaskId)
-	ofile, _ := os.Create(oname)
+	ofile, err := os.OpenFile(oname, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		panic(err)
+	}
 
 	i := 0
 	for i < len(intermediate) {
@@ -126,6 +129,8 @@ func ReduceWorker(reducef func(string, []string) string, TaskId int, Task []stri
 		i = j
 	}
 	ofile.Close()
+
+
 	ReportDone(TaskId)
 }
 
@@ -134,10 +139,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 	for {
 		TaskSort, TaskId, Task, NReduce := GetTask()
-
 		ctx, cancel := context.WithCancel(context.Background())
-
-		fmt.Println("TaskSort", TaskSort, "Task", Task)
 
 		if TaskSort == "Map" {
 
