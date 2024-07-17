@@ -1,12 +1,16 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
-
+import (
+	"6.5840/labrpc"
+	"crypto/rand"
+	"github.com/sasha-s/go-deadlock"
+	"math/big"
+	"time"
+)
 
 type Clerk struct {
 	server *labrpc.ClientEnd
+	mu     deadlock.Mutex
 	// You will have to modify this struct.
 }
 
@@ -35,9 +39,19 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+
+	args := GetArgs{Key: key}
+	reply := GetReply{}
+
+	for {
+		ok := ck.server.Call("KVServer.Get", &args, &reply)
+		if ok == true {
+			return reply.Value
+		}
+		time.Sleep(time.Millisecond * 50)
+	}
+
 }
 
 // shared by Put and Append.
@@ -48,16 +62,51 @@ func (ck *Clerk) Get(key string) string {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-func (ck *Clerk) PutAppend(key string, value string, op string) string {
+func (ck *Clerk) PutAppend(args PutAppendArgs, op string) (reply PutAppendReply, ok bool) {
 	// You will have to modify this function.
-	return ""
+
+	if op == "Put" {
+		ok = ck.server.Call("KVServer.Put", &args, &reply)
+	} else {
+		ok = ck.server.Call("KVServer.Append", &args, &reply)
+	}
+	return
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	i := nrand()
+	args := PutAppendArgs{Key: key, Value: value, Id: int(i)}
+
+	for {
+		_, ok := ck.PutAppend(args, "Put")
+		if ok == true {
+			return
+		}
+		time.Sleep(time.Millisecond * 50)
+	}
+
 }
 
 // Append value to key's value and return that value
 func (ck *Clerk) Append(key string, value string) string {
-	return ck.PutAppend(key, value, "Append")
+
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	i := nrand()
+	args := PutAppendArgs{Key: key, Value: value, Id: int(i)}
+
+	for {
+		reply, ok := ck.PutAppend(args, "Append")
+		if ok == true {
+			DPrintf(" Reply:Value%v\n", reply.Value)
+			return reply.Value
+		}
+		time.Sleep(time.Millisecond * 50)
+	}
+
 }

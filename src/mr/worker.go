@@ -130,7 +130,6 @@ func ReduceWorker(reducef func(string, []string) string, TaskId int, Task []stri
 	}
 	ofile.Close()
 
-
 	ReportDone(TaskId)
 }
 
