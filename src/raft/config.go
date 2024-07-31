@@ -496,7 +496,6 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
-
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
@@ -580,7 +579,18 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
+
+				//if cmd == 103 {
+				//	DPrintf("\n\n")
+				//	DPrintf("time:%v", time.Now())
+				//	for _, raft := range cfg.rafts {
+				//		DPrintf("me:%v,state:%v,term:%v,logs:%v", raft.me, raft.state, raft.currentTerm, raft.logs)
+				//	}
+				//	DPrintf("\n\n")
+				//}
+
 				nd, cmd1 := cfg.nCommitted(index)
+
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
@@ -590,6 +600,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+
 			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}

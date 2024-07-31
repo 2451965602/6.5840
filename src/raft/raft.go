@@ -50,7 +50,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-type Entries struct {
+type Entry struct {
 	Term    int
 	Command interface{}
 	Index   int
@@ -71,7 +71,7 @@ type Raft struct {
 
 	currentTerm int
 	votedFor    int
-	logs        []Entries
+	logs        []Entry
 	commitIndex int
 	lastApplied int
 	nextIndex   []int
@@ -90,11 +90,13 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
-
+	if rf.killed() {
+		return -1, false
+	}
 	term = rf.currentTerm
 	isleader = rf.state == "Leader"
 
-	DPrintf("GetState: term=%d,me=%d,isleader=%v,state:%v", term, rf.me, isleader, rf.state)
+	//DPrintf("GetState: term=%d,me=%d,isleader=%v,state:%v", term, rf.me, isleader, rf.state)
 	return term, isleader
 }
 
@@ -164,12 +166,11 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	NewCommand   bool
 	Term         int
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Logs         []Entries
+	Logs         []Entry
 
 	LeaderCommit int
 }
@@ -212,6 +213,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.lastLeaderCheck = time.Now()
 	} else {
 		reply.VoteGranted = false
 	}
@@ -269,15 +271,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.state == "Leader"
 
 	// Your code here (3B).
+	if rf.killed() {
+		return index, term, false
+	}
 
 	if isLeader {
 		rf.mu.Lock()
 		index = len(rf.logs)
 		term = rf.currentTerm
-		log := Entries{Term: term, Command: command, Index: len(rf.logs)}
+		log := Entry{Term: term, Command: command, Index: len(rf.logs)}
 		rf.logs = append(rf.logs, log)
 		rf.mu.Unlock()
 	}
+
+	//DPrintf("Start:term=%d,me=%d,isleader=%v,state:%v,cmd:%v,log:%v", term, rf.me, isLeader, rf.state, command, rf.logs)
 
 	return index, term, isLeader
 }
@@ -319,6 +326,7 @@ func (rf *Raft) startElement() {
 	rf.lastLeaderCheck = time.Now()
 	rf.mu.Unlock()
 	var wg sync.WaitGroup
+
 	for i := range rf.peers {
 		if i != rf.me {
 			wg.Add(1)
@@ -345,7 +353,7 @@ func (rf *Raft) startElement() {
 							if rf.voteCount >= (len(rf.peers)/2) && rf.state == "Candidate" {
 								rf.state = "Leader"
 								rf.initLeaderState()
-								go rf.sendAppendEntries(true)
+								go rf.sendAppendEntries()
 							}
 						}
 						rf.mu.Unlock()
@@ -354,7 +362,22 @@ func (rf *Raft) startElement() {
 			}(i)
 		}
 	}
-	wg.Wait()
+	done := make(chan struct{})
+	timer := time.NewTimer(300 * time.Millisecond)
+
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+
+	if !timer.Stop() {
+		<-timer.C
+	}
 }
 
 func (rf *Raft) ticker() {
@@ -368,16 +391,17 @@ func (rf *Raft) ticker() {
 			rf.lastLeaderCheck = time.Now()
 			continue
 		}
-		ms := rd.Int63n(300)
-		if time.Since(rf.lastLeaderCheck) > time.Duration(500+ms)*time.Millisecond || rf.state == "Candidate" {
+		ms := rd.Int63n(100)
+		if time.Since(rf.lastLeaderCheck) > time.Duration(400+ms)*time.Millisecond || rf.state == "Candidate" {
 			rf.startElement()
 		}
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms = 50 + (rand.Int63() % 300)
+		ms = 50 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
+
 }
 
 func min(a, b int) int {
@@ -392,9 +416,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
 	rf.lastLeaderCheck = time.Now()
 
-	if args.Term < rf.currentTerm {
+	if args.PrevLogIndex > len(rf.logs)-1 || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -406,25 +436,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 	}
 
-	if args.PrevLogIndex > len(rf.logs)-1 || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if len(args.Logs) == 0 {
 		reply.Term = rf.currentTerm
-		reply.Success = false
-		return
+		reply.Success = true
 	}
 
-	if args.NewCommand {
+	if len(args.Logs) != 0 && len(rf.logs) > args.PrevLogIndex+1 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		rf.logs = rf.logs[:args.PrevLogIndex+1]
-		rf.logs = append(rf.logs, args.Logs...)
-
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-			rf.applyLogs()
-		}
 	}
 
+	if rf.me != args.LeaderId {
+		rf.logs = append(rf.logs, args.Logs...)
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		go rf.applyLogs()
+	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	//DPrintf("AppendEntries:state:%v,term=%d,me=%d,args.Term=%d", rf.state, rf.currentTerm, rf.me, args.Term)
 }
 
 func (rf *Raft) applyLogs() {
@@ -449,16 +479,17 @@ func (rf *Raft) updateCommitIndex() {
 		}
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = n
-			rf.applyLogs()
+			go rf.applyLogs()
 			break
 		}
 	}
 }
 
-func (rf *Raft) sendAppendEntries(once bool) {
+func (rf *Raft) sendAppendEntries() {
 
 	for rf.killed() == false {
 		if rf.state == "Leader" {
+
 			var wg sync.WaitGroup
 			for i := range rf.peers {
 				wg.Add(1)
@@ -471,51 +502,53 @@ func (rf *Raft) sendAppendEntries(once bool) {
 						return
 					}
 
-					args := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, LeaderCommit: rf.commitIndex}
-					if rf.commitIndex < len(rf.logs)-1 {
-						args.NewCommand = true
-						if rf.nextIndex[i] < len(rf.logs)-1 {
-							args.PrevLogIndex = rf.nextIndex[i]
-							args.PrevLogTerm = rf.logs[rf.nextIndex[i]].Term
-							args.Logs = rf.logs[rf.nextIndex[i]:]
-						}
+					args := &AppendEntriesArgs{
+						Term:         rf.currentTerm,
+						LeaderId:     rf.me,
+						LeaderCommit: rf.commitIndex,
+						PrevLogIndex: rf.matchIndex[i],
+						PrevLogTerm:  rf.logs[rf.matchIndex[i]].Term,
+					}
+
+					if rf.nextIndex[i] < len(rf.logs) {
+						args.Logs = rf.logs[rf.nextIndex[i]:]
 					} else {
-						args.NewCommand = false
+						args.Logs = make([]Entry, 0)
 					}
 					rf.mu.Unlock()
 
 					reply := &AppendEntriesReply{}
 
-					rf.peers[i].Call("Raft.AppendEntries", args, reply)
+					ok := rf.peers[i].Call("Raft.AppendEntries", args, reply)
 
 					rf.mu.Lock()
-					if reply.Success {
-						rf.nextIndex[i] = len(rf.logs)
-						rf.matchIndex[i] = rf.nextIndex[i] - 1
-						rf.updateCommitIndex()
-					} else {
-						if reply.Term > rf.currentTerm {
-							rf.state = "Follower"
-							rf.votedFor = -1
-							rf.currentTerm = reply.Term
-						} else if rf.nextIndex[i] > 0 {
-							rf.nextIndex[i]--
+					if ok {
+						if reply.Success {
+							rf.nextIndex[i] += len(args.Logs)
+							rf.matchIndex[i] = rf.nextIndex[i] - 1
+							rf.updateCommitIndex()
+						} else {
+							if reply.Term > rf.currentTerm {
+								rf.state = "Follower"
+								rf.votedFor = -1
+								rf.currentTerm = reply.Term
+								rf.lastLeaderCheck = time.Now()
+							} else if reply.Term == rf.currentTerm && rf.state == "Leader" && rf.nextIndex[i] > 0 {
+								rf.nextIndex[i]--
+							}
 						}
 					}
 					rf.mu.Unlock()
 
 				}(i)
-
 			}
 			wg.Wait()
-		}
-
-		ms := 100 + (rand.Int63() % 20)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-
-		if once {
+		} else {
 			return
 		}
+
+		ms := 150 + (rand.Int63() % 50)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 	}
 
@@ -535,24 +568,22 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+
+	// Your initialization code here (3A, 3B, 3C).
 	rf.state = "Follower"
 	rf.applyCh = applyCh
 
 	rf.nextIndex = make([]int, len(peers))
 	for i := range rf.nextIndex {
-		rf.nextIndex[i] = len(rf.logs)
+		rf.nextIndex[i] = 1
 	}
-	rf.logs = make([]Entries, 0)
-
-	// Your initialization code here (3A, 3B, 3C).
-
-	go rf.sendAppendEntries(false)
+	rf.logs = make([]Entry, 0)
+	rf.logs = append(rf.logs, Entry{Term: 0})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 	return rf
 }

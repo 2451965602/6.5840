@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -188,7 +190,6 @@ func TestFollowerFailure3B(t *testing.T) {
 	cfg.begin("Test (3B): test progressive failure of followers")
 
 	cfg.one(101, servers, false)
-
 	// disconnect one follower from the network.
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 1) % servers)
