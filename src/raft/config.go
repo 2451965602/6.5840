@@ -579,18 +579,8 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-
-				//if cmd == 103 {
-				//	DPrintf("\n\n")
-				//	DPrintf("time:%v", time.Now())
-				//	for _, raft := range cfg.rafts {
-				//		DPrintf("me:%v,state:%v,term:%v,logs:%v", raft.me, raft.state, raft.currentTerm, raft.logs)
-				//	}
-				//	DPrintf("\n\n")
-				//}
-
 				nd, cmd1 := cfg.nCommitted(index)
-
+				//DPrintf("one(%v) index=%v nd=%v cmd1=%v expectedServers=%v\n", cmd, index, nd, cmd1, expectedServers)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
@@ -600,7 +590,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-
 			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
